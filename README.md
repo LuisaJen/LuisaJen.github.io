@@ -17,6 +17,7 @@
   work locally on your website
   you need:
   clone your repository with this command (in the right corner of your repository click the HTTPS button)
-  git clone "https://github.com/<yourname>/<repositoryname>.git"
+  git clone "https://github.com/yourname/repositoryname.git"
+  install live server in VS Code to run html locally
 
   now you are ready to learn html and css to develop your website :)
