@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Our Household Shopping List</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"></script>
+    <style>
+        .checked { text-decoration: line-through; opacity: 0.6; }
+        .glass-morphism {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        body {
+            background-color: #f3f4f6;
+            background-image: radial-gradient(#d1d5db 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+        .user-tag { font-size: 0.65rem; padding: 1px 6px; border-radius: 99px; }
+    </style>
+</head>
+<body class="min-h-screen font-sans text-slate-900 pb-20">
+
+    <div id="app" class="max-w-md mx-auto p-4 sm:p-6 lg:p-8">
+        <!-- Auth Overlay -->
+        <div id="loading-screen" class="fixed inset-0 bg-white z-50 flex items-center justify-center">
+            <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+                <p class="mt-4 text-slate-600">Connecting to Household...</p>
+            </div>
+        </div>
+
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-bold text-indigo-700 tracking-tight">Our Kitchen List</h1>
+            <p class="text-slate-500 text-sm mt-1">Shared Household Shopping</p>
+        </header>
+
+        <div class="glass-morphism rounded-2xl p-4 mb-6 shadow-sm border border-indigo-100">
+            <div class="flex items-center justify-between mb-2">
+                <div>
+                    <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</p>
+                    <p id="connection-status" class="text-indigo-600 font-bold text-sm italic">Authenticating...</p>
+                </div>
+            </div>
+            <div class="pt-2 border-t border-indigo-50 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                <p class="text-[10px] text-slate-500">Member ID: <span id="my-user-id" class="font-mono font-bold">...</span></p>
+            </div>
+        </div>
+
+        <form id="add-form" class="flex gap-2 mb-8">
+            <input type="text" id="item-input" placeholder="Add milk, eggs, bread..." 
+                class="flex-1 px-4 py-3 rounded-xl border-none shadow-sm focus:ring-2 focus:ring-indigo-500 transition outline-none"
+                required>
+            <button type="submit" class="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold shadow-lg hover:bg-indigo-700 active:scale-95 transition">
+                Add
+            </button>
+        </form>
+
+        <div class="flex justify-between items-end mb-4">
+            <h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest">Active List</h2>
+            <button id="finish-shopping-btn" onclick="archiveSession()" class="hidden text-xs text-indigo-600 font-semibold hover:underline">
+                Finish & Store Session
+            </button>
+        </div>
+
+        <div id="list-container" class="space-y-3 mb-10"></div>
+
+        <div id="empty-state" class="hidden text-center py-12 mb-10">
+            <div class="text-4xl mb-4">🛒</div>
+            <p class="text-slate-500">The fridge is full!</p>
+        </div>
+
+        <div class="mt-12">
+            <h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Shopping History</h2>
+            <div id="history-container" class="space-y-2"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, deleteDoc, serverTimestamp, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GITHUB CONFIGURATION ---
+        // REPLACE THIS BLOCK WITH YOUR FIREBASE CONFIG FROM THE CONSOLE
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+        
+        // This is a unique path for your household's data
+        const HOUSEHOLD_PATH_ID = "my-family-list-01"; 
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let currentUser = null;
+        let activeItems = [];
+
+        // UI Selectors
+        const listContainer = document.getElementById('list-container');
+        const historyContainer = document.getElementById('history-container');
+        const emptyState = document.getElementById('empty-state');
+        const addForm = document.getElementById('add-form');
+        const itemInput = document.getElementById('item-input');
+        const loadingScreen = document.getElementById('loading-screen');
+        const finishBtn = document.getElementById('finish-shopping-btn');
+        const myUserIdDisplay = document.getElementById('my-user-id');
+        const statusDisplay = document.getElementById('connection-status');
+
+        async function initAuth() {
+            try {
+                // Sign in anonymously so we don't need a login screen
+                await signInAnonymously(auth);
+
+                onAuthStateChanged(auth, (user) => {
+                    currentUser = user;
+                    if (user) {
+                        statusDisplay.innerText = "Connected";
+                        myUserIdDisplay.innerText = user.uid.substring(0, 8) + '...';
+                        startListening();
+                        loadingScreen.style.display = 'none';
+                    }
+                });
+            } catch (error) {
+                console.error("Auth error:", error);
+                loadingScreen.innerHTML = `<div class="p-8 text-center text-red-500 font-bold">Failed to connect to Firebase. Check your config.</div>`;
+            }
+        }
+
+        function startListening() {
+            // Path structure for public shared data
+            const itemsRef = collection(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_items');
+            onSnapshot(itemsRef, (snapshot) => {
+                activeItems = [];
+                snapshot.forEach(doc => activeItems.push({ id: doc.id, ...doc.data() }));
+                activeItems.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+                renderList(activeItems);
+                
+                const checkedCount = activeItems.filter(i => i.checked).length;
+                checkedCount > 0 ? finishBtn.classList.remove('hidden') : finishBtn.classList.add('hidden');
+            });
+
+            const historyRef = collection(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_history');
+            onSnapshot(historyRef, (snapshot) => {
+                const history = [];
+                snapshot.forEach(doc => history.push({ id: doc.id, ...doc.data() }));
+                history.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+                renderHistory(history);
+            });
+        }
+
+        function renderList(items) {
+            if (items.length === 0) {
+                emptyState.classList.remove('hidden');
+                listContainer.innerHTML = '';
+                return;
+            }
+            emptyState.classList.add('hidden');
+
+            listContainer.innerHTML = items.map(item => {
+                const addedByMe = item.createdBy === currentUser.uid;
+                const checkedByMe = item.checkedBy === currentUser.uid;
+                return `
+                <div class="glass-morphism flex flex-col p-4 rounded-xl shadow-sm">
+                    <div class="flex items-center">
+                        <button onclick="window.toggleItem('${item.id}', ${item.checked})" 
+                            class="w-6 h-6 rounded-full border-2 flex items-center justify-center transition
+                            ${item.checked ? 'bg-indigo-500 border-indigo-500' : 'border-slate-300 hover:border-indigo-500'}">
+                            ${item.checked ? '<span class="text-white text-[10px]">✓</span>' : ''}
+                        </button>
+                        <div class="flex-1 ml-4 flex flex-col">
+                            <span class="font-medium transition ${item.checked ? 'checked text-slate-400' : 'text-slate-700'}">
+                                ${item.name}
+                            </span>
+                            <div class="flex gap-2 mt-1">
+                                <span class="user-tag ${addedByMe ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}">
+                                    Added by: ${addedByMe ? 'You' : item.createdBy?.substring(0, 5)}
+                                </span>
+                                ${item.checked ? `<span class="user-tag ${checkedByMe ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}">Got by: ${checkedByMe ? 'You' : item.checkedBy?.substring(0, 5)}</span>` : ''}
+                            </div>
+                        </div>
+                        <button onclick="window.deleteItem('${item.id}')" class="text-slate-300 hover:text-red-500 transition p-1">
+                            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function renderHistory(sessions) {
+            if (sessions.length === 0) {
+                historyContainer.innerHTML = '<p class="text-xs text-slate-400 italic">No history yet.</p>';
+                return;
+            }
+            historyContainer.innerHTML = sessions.map(session => {
+                const date = session.timestamp ? new Date(session.timestamp.seconds * 1000).toLocaleString() : 'Processing...';
+                return `
+                <details class="group glass-morphism rounded-xl overflow-hidden shadow-sm">
+                    <summary class="flex items-center justify-between p-4 cursor-pointer list-none hover:bg-slate-50">
+                        <div class="flex flex-col"><span class="text-sm font-semibold text-slate-700">${date}</span></div>
+                        <span class="bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full text-[10px] font-bold">${session.items.length} items</span>
+                    </summary>
+                    <div class="px-4 pb-4 pt-2 border-t border-slate-100 bg-slate-50/30">
+                        <ul class="text-xs text-slate-600 space-y-1">
+                            ${session.itemsWithMeta ? session.itemsWithMeta.map(i => `<li class="flex justify-between"><span>${i.name}</span> <span class="text-[9px] opacity-50">By ${i.addedBy?.substring(0, 5)}</span></li>`).join('') : ''}
+                        </ul>
+                    </div>
+                </details>`;
+            }).join('');
+        }
+
+        window.archiveSession = async () => {
+            const checkedItems = activeItems.filter(i => i.checked);
+            if (!currentUser || checkedItems.length === 0) return;
+            const batch = writeBatch(db);
+            const historyRef = collection(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_history');
+            await addDoc(historyRef, {
+                timestamp: serverTimestamp(),
+                items: checkedItems.map(i => i.name),
+                itemsWithMeta: checkedItems.map(i => ({ name: i.name, addedBy: i.createdBy || 'anon' })),
+                shoppers: [...new Set(checkedItems.map(i => i.checkedBy).filter(Boolean))],
+                archivedBy: currentUser.uid
+            });
+            checkedItems.forEach(item => batch.delete(doc(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_items', item.id)));
+            await batch.commit();
+        };
+
+        addForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const name = itemInput.value.trim();
+            if (!name || !currentUser) return;
+            itemInput.value = '';
+            await addDoc(collection(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_items'), {
+                name, checked: false, createdBy: currentUser.uid, createdAt: serverTimestamp()
+            });
+        });
+
+        window.toggleItem = async (id, status) => {
+            await updateDoc(doc(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_items', id), { 
+                checked: !status, checkedBy: !status ? currentUser.uid : null 
+            });
+        };
+
+        window.deleteItem = async (id) => {
+            await deleteDoc(doc(db, 'households', HOUSEHOLD_PATH_ID, 'shopping_items', id));
+        };
+
+        window.onload = initAuth;
+    </script>
+</body>
+</html>
